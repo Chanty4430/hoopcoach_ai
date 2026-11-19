@@ -1,10 +1,11 @@
 import math
 import os
-from pathlib import Path
+import shutil
+import tempfile
 
 import cv2
 import mediapipe as mp
-from ultralytics import YOLO
+from moviepy import VideoFileClip
 
 try:
     from app.biomecanica import calcular_angulo_3pts, evaluar_tecnica_tiro
@@ -13,20 +14,6 @@ except ModuleNotFoundError:
 
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-MODELS_DIR = BASE_DIR / "models"
-
-
-def _resolver_ruta_modelo() -> str:
-    """Busca un modelo entrenado en models/best.pt; si no existe, usa yolo11n.pt."""
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    best_model = MODELS_DIR / "best.pt"
-    base_model = MODELS_DIR / "yolo11n.pt"
-
-    if best_model.exists():
-        return str(best_model)
-    return str(base_model)
 
 
 def aplicar_clahe(frame):
@@ -38,8 +25,36 @@ def aplicar_clahe(frame):
     return cv2.cvtColor(cv2.merge((l_mejorado, a_canal, b_canal)), cv2.COLOR_LAB2BGR)
 
 
-def analizar_video(ruta_video: str, ruta_video_salida: str | None = None, callback_progreso=None) -> dict:
-    """Procesa un video grabado de entrenamiento individual y devuelve métricas biomecánicas."""
+def _convertir_a_h264_moviepy(ruta_origen: str, ruta_destino: str, fps: float) -> bool:
+    """Convierte el video generado por OpenCV a H.264 compatible con HTML5 usando MoviePy."""
+    clip = None
+    try:
+        clip = VideoFileClip(ruta_origen)
+        clip.write_videofile(
+            ruta_destino,
+            fps=fps,
+            codec="libx264",
+            audio=False,
+            logger=None,
+            ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        )
+        return os.path.exists(ruta_destino) and os.path.getsize(ruta_destino) > 0
+    except Exception:
+        return False
+    finally:
+        if clip is not None:
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+
+def analizar_video(
+    ruta_video: str,
+    ruta_video_salida: str | None = None,
+    callback_progreso=None,
+) -> dict:
+    """Procesa un video grabado de entrenamiento individual enfocado en postura y ángulos."""
     if not os.path.exists(ruta_video):
         return {"error": f"No se encontró el archivo de video: {ruta_video}"}
 
@@ -52,19 +67,14 @@ def analizar_video(ruta_video: str, ruta_video_salida: str | None = None, callba
     ancho = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     alto = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Estimación sencilla de escala píxel-a-metro basada en alto del cuadro
-    factor_px_a_m = 2.0 / max(alto, 1)
-    tiempo_frame_s = 1.0 / max(fps, 1.0)
-
+    ruta_cv_raw = None
     writer = None
     if ruta_video_salida:
+        temp_raw = tempfile.NamedTemporaryFile(delete=False, suffix="_raw.mp4")
+        ruta_cv_raw = temp_raw.name
+        temp_raw.close()
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(ruta_video_salida, fourcc, fps, (ancho, alto))
-
-    ruta_modelo = _resolver_ruta_modelo()
-    modelo = YOLO(ruta_modelo)
-    es_modelo_propio = Path(ruta_modelo).name == "best.pt"
-    clases_balon = [0] if es_modelo_propio else [32]
+        writer = cv2.VideoWriter(ruta_cv_raw, fourcc, fps, (ancho, alto))
 
     pose = mp_pose.Pose(
         static_image_mode=False,
@@ -76,8 +86,6 @@ def analizar_video(ruta_video: str, ruta_video_salida: str | None = None, callba
 
     frame_count = 0
     cadera_previa = None
-    posicion_balon_previa = None
-    historial_velocidades = []
     angulos_rodilla = []
     angulos_codo = []
     angulos_hombro = []
@@ -95,7 +103,6 @@ def analizar_video(ruta_video: str, ruta_video_salida: str | None = None, callba
             frame_procesado = aplicar_clahe(frame)
             frame_rgb = cv2.cvtColor(frame_procesado, cv2.COLOR_BGR2RGB)
 
-            # 1. Estimación de pose con MediaPipe
             resultados_pose = pose.process(frame_rgb)
             if resultados_pose.pose_landmarks:
                 lm = resultados_pose.pose_landmarks.landmark
@@ -145,44 +152,6 @@ def analizar_video(ruta_video: str, ruta_video_salida: str | None = None, callba
                         mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
                     )
 
-            # 2. Detección de balón con YOLO
-            resultados_yolo = modelo.predict(
-                frame_procesado,
-                conf=0.12,
-                classes=clases_balon,
-                verbose=False,
-            )
-
-            vel_actual_kmh = 0.0
-            if resultados_yolo and len(resultados_yolo[0].boxes) > 0:
-                caja = resultados_yolo[0].boxes[0]
-                x1, y1, x2, y2 = caja.xyxy[0].cpu().numpy()
-                cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-
-                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 165, 255), 2)
-                cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
-
-                if posicion_balon_previa is not None:
-                    dist_px = math.hypot(cx - posicion_balon_previa[0], cy - posicion_balon_previa[1])
-                    dist_m = dist_px * factor_px_a_m
-                    vel_actual_kmh = (dist_m / tiempo_frame_s) * 3.6
-                    if vel_actual_kmh < 120.0:
-                        historial_velocidades.append(vel_actual_kmh)
-
-                posicion_balon_previa = (cx, cy)
-            else:
-                posicion_balon_previa = None
-
-            cv2.putText(
-                frame,
-                f"Velocidad: {vel_actual_kmh:.1f} km/h",
-                (25, 45),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.85,
-                (0, 255, 255),
-                2,
-            )
-
             if writer:
                 writer.write(frame)
     finally:
@@ -191,32 +160,47 @@ def analizar_video(ruta_video: str, ruta_video_salida: str | None = None, callba
             writer.release()
         pose.close()
 
+    ruta_final_video = None
+    if ruta_video_salida and ruta_cv_raw and os.path.exists(ruta_cv_raw):
+        if _convertir_a_h264_moviepy(ruta_cv_raw, ruta_video_salida, fps):
+            ruta_final_video = ruta_video_salida
+            try:
+                os.remove(ruta_cv_raw)
+            except OSError:
+                pass
+        else:
+            shutil.move(ruta_cv_raw, ruta_video_salida)
+            ruta_final_video = ruta_video_salida
+
     if not angulos_codo:
         return {"error": "No se pudo detectar la postura del jugador en el video."}
 
     min_rodilla = min(angulos_rodilla) if angulos_rodilla else None
     max_codo = max(angulos_codo) if angulos_codo else None
     angulo_hombro_ref = max(angulos_hombro) if angulos_hombro else None
-    vel_maxima = max(historial_velocidades) if historial_velocidades else 0.0
 
     tiro = evaluar_tecnica_tiro(
         min_rodilla=min_rodilla,
         max_codo=max_codo,
         angulo_hombro=angulo_hombro_ref,
-        velocidad_kmh=vel_maxima,
+        velocidad_kmh=0.0,
         tiro_id=1,
     )
 
+    tiro.setdefault("min_rodilla", min_rodilla)
+    tiro.setdefault("max_codo", max_codo)
+    tiro.setdefault("angulo_hombro", angulo_hombro_ref)
+
     return {
-        "modelo_usado": Path(ruta_modelo).name,
+        "modo_analisis": "postura_mediapipe",
+        "ruta_video_salida": ruta_final_video,
         "resumen": {
             "tiros_detectados": 1,
-            "tiros_correctos": 1 if tiro["correcto"] else 0,
-            "puntaje_promedio": tiro["puntaje"],
-            "velocidad_maxima": tiro["velocidad_kmh"],
+            "tiros_correctos": 1 if tiro.get("correcto") else 0,
+            "puntaje_promedio": tiro.get("puntaje", 0),
+            "velocidad_maxima": 0.0,
         },
         "tiros": [tiro],
-        "fallos_frecuentes": tiro["fallos"],
-        "recomendaciones": tiro["recomendaciones"],
-        "velocidades": [round(v, 1) for v in historial_velocidades],
+        "fallos_frecuentes": tiro.get("fallos", []),
+        "recomendaciones": tiro.get("recomendaciones", []),
     }

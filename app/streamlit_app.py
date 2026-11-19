@@ -1,15 +1,15 @@
 import os
-import tempfile
 from pathlib import Path
+import tempfile
 
 import plotly.graph_objects as go
 import streamlit as st
-from moviepy import VideoFileClip
 
 try:
     from app.analizador_video import analizar_video
 except ModuleNotFoundError:
     from analizador_video import analizar_video
+
 
 st.set_page_config(
     page_title="HoopCoach AI",
@@ -18,9 +18,13 @@ st.set_page_config(
 )
 
 st.title("🏀 HoopCoach AI")
-st.markdown("Análisis biomecánico de videos grabados de lanzamiento en baloncesto.")
+st.caption("Análisis biomecánico de postura en videos grabados de lanzamiento en baloncesto.")
 
-# Barra lateral: carga del video grabado
+if "resultado_analisis" not in st.session_state:
+    st.session_state.resultado_analisis = None
+if "video_bytes_salida" not in st.session_state:
+    st.session_state.video_bytes_salida = None
+
 st.sidebar.header("Cargar video de entrenamiento")
 archivo_video = st.sidebar.file_uploader(
     "Sube un video de tu sesión",
@@ -28,139 +32,126 @@ archivo_video = st.sidebar.file_uploader(
 )
 
 if archivo_video is not None:
-    sufijo_entrada = Path(archivo_video.name).suffix or ".mp4"
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=sufijo_entrada) as tmp_in:
-        tmp_in.write(archivo_video.read())
-        ruta_tmp_in = tmp_in.name
-
-    ruta_tmp_out = tempfile.mktemp(suffix="_procesado.mp4")
-    ruta_tmp_web = tempfile.mktemp(suffix="_web.mp4")
-
     st.sidebar.success(f"Video listo: {archivo_video.name}")
+    analizar_btn = st.sidebar.button("🚀 Analizar postura", type="primary")
+else:
+    analizar_btn = False
+    st.info("Sube un video grabado en la barra lateral para comenzar el análisis de postura.")
 
-    if st.sidebar.button("🚀 Analizar lanzamiento", type="primary"):
-        barra = st.progress(0.0, text="Iniciando análisis...")
-        datos = None
+if archivo_video is not None and analizar_btn:
+    progreso_bar = st.progress(0, text="Iniciando análisis...")
 
-        def actualizar_progreso(valor: float):
-            barra.progress(min(max(valor, 0.0), 0.95), text=f"Procesando video... {int(valor * 100)}%")
+    def actualizar_progreso(valor: float):
+        progreso_bar.progress(
+            min(max(valor, 0.0), 1.0),
+            text=f"Analizando postura... {int(min(max(valor, 0.0), 1.0) * 100)}%",
+        )
 
-        try:
-            with st.spinner("Analizando postura y balón frame a frame..."):
-                datos = analizar_video(
-                    ruta_video=ruta_tmp_in,
-                    ruta_video_salida=ruta_tmp_out,
-                    callback_progreso=actualizar_progreso,
-                )
-        finally:
-            if os.path.exists(ruta_tmp_in):
-                try:
-                    os.unlink(ruta_tmp_in)
-                except OSError:
-                    pass
+    suffix = Path(archivo_video.name).suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_in:
+        temp_in.write(archivo_video.getbuffer())
+        ruta_entrada = temp_in.name
 
-        barra.progress(1.0, text="¡Análisis completado!")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_out:
+        ruta_salida = temp_out.name
 
-        if not datos or "error" in datos:
-            mensaje_error = datos.get("error", "Error desconocido al analizar el video.") if datos else "No se obtuvieron datos."
-            st.error(f"Error: {mensaje_error}")
-            st.stop()
+    try:
+        datos = analizar_video(
+            ruta_video=ruta_entrada,
+            ruta_video_salida=ruta_salida,
+            callback_progreso=actualizar_progreso,
+        )
+        progreso_bar.progress(1.0, text="Análisis completado.")
 
-        # Recodificación a H.264 para compatibilidad en el reproductor web
-        video_web_listo = False
-        if os.path.exists(ruta_tmp_out):
+        if "error" not in datos and os.path.exists(ruta_salida) and os.path.getsize(ruta_salida) > 0:
+            with open(ruta_salida, "rb") as f_out:
+                st.session_state.video_bytes_salida = f_out.read()
+        else:
+            st.session_state.video_bytes_salida = None
+
+        st.session_state.resultado_analisis = datos
+    finally:
+        if os.path.exists(ruta_entrada):
+            os.remove(ruta_entrada)
+        if os.path.exists(ruta_salida):
             try:
-                clip = VideoFileClip(ruta_tmp_out)
-                clip.write_videofile(
-                    ruta_tmp_web,
-                    codec="libx264",
-                    audio=False,
-                    logger=None,
-                )
-                clip.close()
-                video_web_listo = os.path.exists(ruta_tmp_web)
-            except Exception as exc:
-                st.warning(f"No se pudo recodificar el video para vista web: {exc}")
-            finally:
-                if os.path.exists(ruta_tmp_out):
-                    try:
-                        os.unlink(ruta_tmp_out)
-                    except OSError:
-                        pass
+                os.remove(ruta_salida)
+            except OSError:
+                pass
 
-        modelo_usado = datos.get("modelo_usado", "yolo11n.pt")
-        st.caption(f"Modelo de detección utilizado: `{modelo_usado}`")
+datos = st.session_state.resultado_analisis
+video_bytes = st.session_state.video_bytes_salida
 
-        resumen = datos["resumen"]
-        tiros = datos["tiros"]
-        recomendaciones = datos.get("recomendaciones", [])
+if datos is not None:
+    if "error" in datos:
+        st.error(datos["error"])
+    else:
+        st.caption("Modo actual: análisis biomecánico de postura con MediaPipe")
 
-        # Resumen de métricas
-        st.subheader("📊 Resumen del análisis")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("🏀 Tiros evaluados", resumen["tiros_detectados"])
-        col2.metric("✅ Tiros correctos", resumen["tiros_correctos"])
-        col3.metric("⭐ Puntaje", f"{resumen['puntaje_promedio']}/100")
-        col4.metric("⚡ Velocidad máx.", f"{resumen['velocidad_maxima']} km/h")
+        resumen = datos.get("resumen", {})
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Tiros evaluados", resumen.get("tiros_detectados", 1))
+        col2.metric("Posturas correctas", resumen.get("tiros_correctos", 0))
+        col3.metric("Puntaje promedio", f"{resumen.get('puntaje_promedio', 0)} / 100")
 
-        st.divider()
+        tiros = datos.get("tiros", [])
+        if tiros:
+            tiro_actual = tiros[0]
+            st.subheader("Ángulos articulares registrados")
 
-        # Reproducción de videos
-        st.subheader("🎥 Comparación visual")
-        tab_procesado, tab_original = st.tabs(["Video Procesado", "Video Original"])
-
-        with tab_procesado:
-            if video_web_listo:
-                st.video(ruta_tmp_web)
-            else:
-                st.info("No hay vista previa procesada disponible para este archivo.")
-
-        with tab_original:
-            st.video(archivo_video)
-
-        st.divider()
-
-        # Gráfica de puntaje y ángulos
-        col_graf, col_det = st.columns([1.2, 1])
-
-        with col_graf:
-            st.subheader("🎯 Puntaje técnico")
-            fig = go.Figure()
-            fig.add_trace(
-                go.Bar(
-                    x=[f"Tiro {t['id']}" for t in tiros],
-                    y=[t["puntaje"] for t in tiros],
-                    text=[f"{t['puntaje']} pts" for t in tiros],
-                    textposition="auto",
-                    marker_color=["#00CC96" if t["correcto"] else "#EF553B" for t in tiros],
-                )
+            ang_col1, ang_col2, ang_col3 = st.columns(3)
+            ang_col1.metric(
+                "Flexión mínima rodilla",
+                f"{tiro_actual.get('min_rodilla', 0):.1f}°" if tiro_actual.get("min_rodilla") is not None else "N/A",
             )
-            fig.add_hline(
-                y=80,
-                line_dash="dash",
-                line_color="green",
-                annotation_text="Meta (80 pts)",
+            ang_col2.metric(
+                "Extensión máxima codo",
+                f"{tiro_actual.get('max_codo', 0):.1f}°" if tiro_actual.get("max_codo") is not None else "N/A",
+            )
+            ang_col3.metric(
+                "Ángulo de hombro",
+                f"{tiro_actual.get('angulo_hombro', 0):.1f}°" if tiro_actual.get("angulo_hombro") is not None else "N/A",
+            )
+
+            fig = go.Figure(
+                data=[
+                    go.Bar(
+                        x=["Rodilla (mín)", "Codo (máx)", "Hombro"],
+                        y=[
+                            tiro_actual.get("min_rodilla") or 0,
+                            tiro_actual.get("max_codo") or 0,
+                            tiro_actual.get("angulo_hombro") or 0,
+                        ],
+                    )
+                ]
             )
             fig.update_layout(
-                yaxis=dict(range=[0, 105]),
+                title="Resumen de ángulos articulares (°)",
+                yaxis_title="Grados (°)",
                 height=340,
-                margin=dict(l=20, r=20, t=30, b=20),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
-        with col_det:
-            st.subheader("📐 Ángulos registrados")
-            for t in tiros:
-                st.write(f"- **Flexión mínima de rodilla:** {t['flexion_rodilla']}°")
-                st.write(f"- **Extensión máxima de codo:** {t['extension_codo']}°")
-                st.write(f"- **Ángulo de hombro:** {t['angulo_hombro']}°")
+        fallos = datos.get("fallos_frecuentes", [])
+        recomendaciones = datos.get("recomendaciones", [])
 
-            st.subheader("💡 Retroalimentación")
-            for rec in recomendaciones:
-                if "Excelente" in rec:
-                    st.success(rec)
-                else:
-                    st.warning(rec)
-else:
-    st.info("👈 Sube un video grabado en el panel izquierdo para comenzar el análisis.")
+        rec_col1, rec_col2 = st.columns(2)
+        with rec_col1:
+            st.subheader("Aspectos a corregir")
+            if fallos:
+                for fallo in fallos:
+                    st.write(f"- {fallo}")
+            else:
+                st.write("No se detectaron fallos relevantes en la postura.")
+
+        with rec_col2:
+            st.subheader("Recomendaciones")
+            if recomendaciones:
+                for rec in recomendaciones:
+                    st.write(f"- {rec}")
+            else:
+                st.write("Mantén la consistencia de la mecánica registrada.")
+
+        if video_bytes:
+            st.subheader("Video procesado con esqueleto de postura")
+            st.video(video_bytes, format="video/mp4")

@@ -1,0 +1,9 @@
+HoopCoach/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pt
+*.mp4
+*.mov
+*.avi
+.env

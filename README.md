@@ -26,41 +26,6 @@ HoopCoach AI is a Python-based virtual basketball coach that uses Computer Visio
 | NumPy | Numerical computations |
 | YOLO | Basketball detection and tracking |
 
-## Download the program
-
-You can download the executable version for Windows from the releases section:
-
-[**Download HOOPCOACH-AI**](https://github.com/santiagograja4430-ship-it/hoopcoach-ai/releases/tag/v1.0.0)
-
-### Usage Instructions
-
-1. Download `HoopCoachAI-Windows-v1.0.zip`.
-2. Extract the ZIP file.
-3. Open the `HoopCoachAI` folder.
-4. Run `HoopCoachAI.exe`.
-
-> the executable must remain alongside the _internal folder and the other included files. If the folder is deleted, the executable will not work.
->
-> # Installation
-
-<h2>1. Clone the repository</h2>
-
-```bash
-git clone https://github.com/santiagograja4430-ship-it/hoopcoach-ai.git
-```
-
-<h2>2. Install the dependencies</h2>
-
-```bash
-pip install -r requirements.txt
-```
-
-<h2>3. Run the application</h2>
-
-```bash
-python App/main.py
-```
-
 # Current Status
 
 HoopCoach AI can currently:
@@ -79,10 +44,4 @@ The project is still under development, and future versions will include:
 - Improved tracking accuracy.
 - Performance statistics and training reports.
 
-<p align="center">
-    <img src="IMAGES/Nombre2.png" width="500">
-</p>
-
 # License
-
-This project was developed for educational purposes as part of Hack Club's Macondo program.
